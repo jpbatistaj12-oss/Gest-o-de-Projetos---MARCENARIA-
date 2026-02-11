@@ -8,7 +8,7 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <script>
-        // Shim imediato para evitar o erro "process is not defined" em qualquer ambiente
+        // Shim essencial para evitar o erro fatal "process is not defined" no navegador
         window.process = { env: { API_KEY: "" } };
     </script>
     <style>
@@ -20,6 +20,14 @@
         }
         #root {
             min-height: 100vh;
+        }
+        /* Estilo para o pulso do indicador pendente */
+        .animate-subtle-pulse {
+            animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: .7; }
         }
     </style>
 <script type="importmap">

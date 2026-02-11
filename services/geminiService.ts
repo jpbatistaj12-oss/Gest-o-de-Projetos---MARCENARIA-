@@ -7,7 +7,11 @@ export class GeminiService {
 
   private getClient() {
     if (!this.ai) {
-      const apiKey = typeof process !== 'undefined' ? process.env.API_KEY : '';
+      // Verificação mais robusta para ambientes onde window.process pode ser instável
+      const apiKey = (typeof process !== 'undefined' && process.env?.API_KEY) 
+        ? process.env.API_KEY 
+        : (window as any).process?.env?.API_KEY || '';
+      
       this.ai = new GoogleGenAI({ apiKey: apiKey || '' });
     }
     return this.ai;
@@ -17,12 +21,11 @@ export class GeminiService {
     try {
       const client = this.getClient();
       const prompt = `
-        Aja como um consultor de marmoraria. Analise o seguinte projeto:
+        Analise o status deste projeto de marmoraria:
         Cliente: ${project.clientName}
-        Status: ${project.status}
         Ambientes: ${project.environments.map(e => `${e.name} (R$ ${e.value})`).join(', ')}
         
-        Gere uma breve análise (3 frases) sobre o status financeiro e logístico deste projeto, dando uma dica prática para a finalização ou otimização do lucro.
+        Gere uma análise rápida de 2 frases focada em produtividade.
       `;
 
       const response = await client.models.generateContent({
@@ -30,10 +33,10 @@ export class GeminiService {
         contents: prompt,
       });
 
-      return response.text || "Não foi possível gerar uma análise automática no momento.";
+      return response.text || "Análise indisponível no momento.";
     } catch (error) {
       console.error("Gemini Error:", error);
-      return "Erro ao conectar com assistente inteligente.";
+      return "Erro ao processar análise inteligente.";
     }
   }
 }
