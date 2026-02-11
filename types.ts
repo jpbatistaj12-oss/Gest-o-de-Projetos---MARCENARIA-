@@ -23,11 +23,12 @@ export interface Project {
   status: ProjectStatus;
   receivedDate: string;
   measurementDate?: string;
-  deadlineDate?: string; // Novo campo para data de entrega programada
+  deadlineDate?: string;
   finishedDate?: string;
   environments: Environment[];
   commissionPercentage: number;
   notes?: string;
+  isExternal?: boolean; // Identifica se veio da planilha Google
 }
 
 export interface DashboardStats {

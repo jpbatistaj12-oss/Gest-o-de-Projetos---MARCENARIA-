@@ -12,16 +12,107 @@ const App: React.FC = () => {
     const saved = localStorage.getItem('marmore-projects');
     return saved ? JSON.parse(saved) : [];
   });
+  const [sheetUrl, setSheetUrl] = useState<string>(() => {
+    return localStorage.getItem('marmore-sheet-url') || '';
+  });
+  const [isSyncing, setIsSyncing] = useState(false);
   const [isFormOpen, setIsFormOpen] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [editingProject, setEditingProject] = useState<Project | undefined>(undefined);
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<ProjectStatus | 'Todos'>('Todos');
   const [aiAnalysis, setAiAnalysis] = useState<Record<string, string>>({});
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     localStorage.setItem('marmore-projects', JSON.stringify(projects));
   }, [projects]);
+
+  useEffect(() => {
+    localStorage.setItem('marmore-sheet-url', sheetUrl);
+    if (sheetUrl && projects.length === 0) {
+      handleSyncGoogleSheet(sheetUrl);
+    }
+  }, [sheetUrl]);
+
+  const handleSyncGoogleSheet = async (url: string) => {
+    if (!url) return;
+    setIsSyncing(true);
+    try {
+      const response = await fetch(url);
+      const text = await response.text();
+      const lines = text.split(/\r?\n/);
+      
+      const newProjects: Project[] = [];
+      
+      // O layout enviado começa os dados reais na linha 5 (index 4)
+      // E a tabela de "PROJETOS LIBERADOS" começa na coluna 7 (index 6)
+      for (let i = 4; i < lines.length; i++) {
+        const line = lines[i];
+        if (!line) continue;
+        
+        // Regex para lidar com vírgulas dentro de aspas (ex: "BANHO MASTER, COZINHA")
+        const values = line.match(/(".*?"|[^",\s]+)(?=\s*,|\s*$)/g) || line.split(',');
+        const cleanValues = values.map(v => v.replace(/^"|"$/g, '').trim());
+
+        // Colunas da tabela "LIBERADOS":
+        // 6: DATA (index 6)
+        // 7: CLIENTE (index 7)
+        // 8: AMBIENTE (index 8)
+        // 9: MEDIÇÃO (index 9)
+        // 10: PEDIDO (index 10)
+        // 11: VALOR (index 11)
+        
+        const dataStr = cleanValues[6];
+        const cliente = cleanValues[7];
+        const ambiente = cleanValues[8];
+        const pedido = cleanValues[10];
+        const valorStr = cleanValues[11] || "";
+
+        if (!cliente || cliente === "CLIENTE") continue;
+
+        // Limpeza de valor (R$ 1.234,56 -> 1234.56)
+        const valorNumeric = parseFloat(
+          valorStr.replace('R$', '').replace(/\./g, '').replace(',', '.').trim()
+        ) || 0;
+
+        // Criar ID baseado no Pedido + Cliente para evitar duplicidade na sincronização
+        const syncId = `sheet-${pedido}-${cliente}-${ambiente}`;
+        
+        // Só adiciona se não for uma linha de total ou vazia
+        if (valorNumeric > 0 || ambiente) {
+          newProjects.push({
+            id: syncId,
+            clientName: cliente,
+            orderNumber: pedido,
+            receivedDate: dataStr || new Date().toISOString().split('T')[0],
+            status: ProjectStatus.ANDAMENTO,
+            environments: [{
+              id: crypto.randomUUID(),
+              name: ambiente || 'Geral',
+              value: valorNumeric,
+              completed: false
+            }],
+            commissionPercentage: 0.5, // Padrão
+            isExternal: true,
+            notes: `Importado via Google Sheets. Medição: ${cleanValues[9]}`
+          });
+        }
+      }
+
+      if (newProjects.length > 0) {
+        // Mesclar projetos (mantém os manuais, atualiza/adiciona os da planilha)
+        setProjects(prev => {
+          const manualOnes = prev.filter(p => !p.isExternal);
+          return [...manualOnes, ...newProjects];
+        });
+      }
+    } catch (error) {
+      console.error("Erro ao sincronizar:", error);
+      alert("Erro ao ler a planilha. Verifique se o link está correto e se foi 'Publicado na Web' como CSV.");
+    } finally {
+      setIsSyncing(false);
+    }
+  };
 
   const getProjectAlerts = (project: Project) => {
     const alerts: { type: 'warning' | 'danger', message: string }[] = [];
@@ -105,162 +196,12 @@ const App: React.FC = () => {
     return total * (project.commissionPercentage / 100);
   };
 
-  const handleImportCSV = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const text = e.target?.result as string;
-      if (!text) return;
-
-      const lines = text.split(/\r?\n/);
-      if (lines.length < 2) return;
-
-      // Detectar delimitador (vírgula ou ponto-e-vírgula)
-      const firstLine = lines[0];
-      const delimiter = firstLine.includes(';') ? ';' : ',';
-      
-      const headers = firstLine.split(delimiter).map(h => h.trim().toLowerCase().replace(/"/g, ''));
-      
-      const newProjects: Project[] = [];
-
-      for (let i = 1; i < lines.length; i++) {
-        if (!lines[i].trim()) continue;
-        
-        const values = lines[i].split(delimiter).map(v => v.trim().replace(/"/g, ''));
-        const row: Record<string, string> = {};
-        headers.forEach((header, index) => {
-          row[header] = values[index] || '';
-        });
-
-        // Tentar mapear campos
-        const clientName = row['cliente'] || row['nome'] || row['client'] || '';
-        if (!clientName) continue;
-
-        const orderNumber = row['pedido'] || row['order'] || row['numero'] || '';
-        const email = row['email'] || row['e-mail'] || '';
-        const phone = row['telefone'] || row['phone'] || row['celular'] || '';
-        const statusStr = row['status'] || '';
-        const valueStr = row['valor'] || row['total'] || '0';
-        const notes = row['observacoes'] || row['notas'] || '';
-        const commStr = row['comissao'] || row['%'] || '0';
-
-        // Validar status
-        let status = ProjectStatus.ESPERA;
-        if (Object.values(ProjectStatus).includes(statusStr as ProjectStatus)) {
-          status = statusStr as ProjectStatus;
-        }
-
-        const value = parseFloat(valueStr.replace(',', '.')) || 0;
-        const commission = parseFloat(commStr.replace(',', '.')) || 0;
-
-        const environments: Environment[] = [{
-          id: crypto.randomUUID(),
-          name: 'Ambiente Importado',
-          value: value,
-          completed: status === ProjectStatus.FINALIZADO
-        }];
-
-        newProjects.push({
-          id: crypto.randomUUID(),
-          clientName,
-          clientEmail: email,
-          clientPhone: phone,
-          orderNumber: orderNumber,
-          status,
-          receivedDate: new Date().toISOString().split('T')[0],
-          environments,
-          commissionPercentage: commission,
-          notes: notes
-        });
-      }
-
-      if (newProjects.length > 0) {
-        if (window.confirm(`Deseja importar ${newProjects.length} projetos da planilha?`)) {
-          setProjects(prev => [...prev, ...newProjects]);
-        }
-      } else {
-        alert("Não foi possível encontrar dados válidos na planilha. Certifique-se de que a primeira linha contém os cabeçalhos (ex: Cliente, Valor, Status).");
-      }
-      
-      if (fileInputRef.current) fileInputRef.current.value = '';
-    };
-
-    reader.readAsText(file);
-  };
-
-  const handleExportCSV = () => {
-    if (filteredProjects.length === 0) {
-      alert("Não há projetos para exportar.");
-      return;
-    }
-
-    const headers = [
-      "Pedido",
-      "Cliente",
-      "Telefone",
-      "E-mail",
-      "Status",
-      "Data Recebimento",
-      "Data Medicao",
-      "Prazo",
-      "Data Finalizacao",
-      "Ambientes",
-      "Valor Total (R$)",
-      "Valor Concluido (R$)",
-      "% Comissao",
-      "Valor Comissao (R$)",
-      "Observacoes"
-    ];
-
-    const rows = filteredProjects.map(p => {
-      const total = calculateProjectTotal(p);
-      const completed = calculateCompletedTotal(p);
-      const commission = calculateCommission(p);
-      const environmentsList = p.environments.map(e => `${e.name}${e.completed ? ' [Concluido]' : ''} (R$${e.value})`).join('; ');
-      
-      return [
-        p.orderNumber || "-",
-        p.clientName,
-        p.clientPhone || "-",
-        p.clientEmail || "-",
-        p.status,
-        p.receivedDate,
-        p.measurementDate || "-",
-        p.deadlineDate || "-",
-        p.finishedDate || "-",
-        `"${environmentsList}"`,
-        total.toFixed(2),
-        completed.toFixed(2),
-        p.commissionPercentage.toString(),
-        commission.toFixed(2),
-        `"${(p.notes || "").replace(/"/g, '""')}"`
-      ];
-    });
-
-    const csvContent = [
-      headers.join(","),
-      ...rows.map(row => row.join(","))
-    ].join("\n");
-
-    const blob = new Blob(["\ufeff" + csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.setAttribute("href", url);
-    link.setAttribute("download", `exportacao_projetos_${new Date().toISOString().split('T')[0]}.csv`);
-    link.style.visibility = 'hidden';
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
-
   return (
     <div className="min-h-screen flex flex-col md:flex-row">
       <aside className="w-full md:w-64 bg-stone-900 text-white p-6 flex flex-col shrink-0">
         <div className="flex items-center gap-3 mb-10 px-2">
           <div className="w-8 h-8 bg-emerald-500 rounded flex items-center justify-center font-bold text-xl">GP</div>
-          <h1 className="text-xl font-bold tracking-tight">Gestão de Projetos</h1>
+          <h1 className="text-xl font-bold tracking-tight">Marmoraria Pro</h1>
         </div>
 
         <nav className="space-y-2 flex-1">
@@ -276,10 +217,26 @@ const App: React.FC = () => {
           >
             <Icons.Wallet /> Projetos
           </button>
+          
+          <div className="pt-4 mt-4 border-t border-stone-800">
+            <button
+              onClick={() => setIsSettingsOpen(true)}
+              className="w-full flex items-center gap-3 px-4 py-3 rounded-lg text-stone-400 hover:bg-stone-800 transition-colors"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+              Google Planilhas
+            </button>
+          </div>
         </nav>
 
         <div className="mt-auto pt-6 border-t border-stone-800 text-stone-500 text-xs px-2">
-          © 2024 Gestão de Projetos v1.0
+          {sheetUrl && (
+            <div className="mb-2 flex items-center gap-1 text-emerald-500 font-medium">
+              <div className="w-1.5 h-1.5 rounded-full bg-emerald-500"></div>
+              Planilha Vinculada
+            </div>
+          )}
+          © 2024 Marmoraria v1.2
         </div>
       </aside>
 
@@ -289,17 +246,29 @@ const App: React.FC = () => {
             <h2 className="text-2xl font-bold text-stone-800">
               {activeTab === 'dashboard' ? 'Visão Geral' : 'Gestão de Projetos'}
             </h2>
-            <p className="text-stone-500">Controle seus ambientes, valores e comissões</p>
+            <p className="text-stone-500">Sincronizado com sua produção</p>
           </div>
-          <button
-            onClick={() => {
-              setEditingProject(undefined);
-              setIsFormOpen(true);
-            }}
-            className="bg-emerald-600 hover:bg-emerald-700 text-white px-5 py-2 rounded-lg font-semibold flex items-center gap-2 shadow-lg shadow-emerald-200 transition-all"
-          >
-            <Icons.Plus /> Novo Projeto
-          </button>
+          <div className="flex gap-2">
+            {sheetUrl && (
+               <button
+                onClick={() => handleSyncGoogleSheet(sheetUrl)}
+                disabled={isSyncing}
+                className={`px-4 py-2 rounded-lg font-semibold flex items-center gap-2 border border-stone-200 bg-white text-stone-700 transition-all ${isSyncing ? 'opacity-50' : 'hover:bg-stone-50'}`}
+              >
+                <svg className={`${isSyncing ? 'animate-spin' : ''}`} xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"></path><path d="M21 3v5h-5"></path></svg>
+                {isSyncing ? 'Sincronizando...' : 'Sincronizar Planilha'}
+              </button>
+            )}
+            <button
+              onClick={() => {
+                setEditingProject(undefined);
+                setIsFormOpen(true);
+              }}
+              className="bg-emerald-600 hover:bg-emerald-700 text-white px-5 py-2 rounded-lg font-semibold flex items-center gap-2 shadow-lg shadow-emerald-200 transition-all"
+            >
+              <Icons.Plus /> Novo Projeto
+            </button>
+          </div>
         </header>
 
         {activeTab === 'dashboard' ? (
@@ -321,45 +290,16 @@ const App: React.FC = () => {
               </div>
               
               <div className="flex flex-wrap items-center gap-3 shrink-0">
-                <div className="flex items-center gap-2 mr-2">
-                  <span className="text-sm font-medium text-stone-500 whitespace-nowrap">Status:</span>
-                  <select 
-                    className="p-2 border border-stone-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500 bg-white"
-                    value={statusFilter}
-                    onChange={(e) => setStatusFilter(e.target.value as ProjectStatus | 'Todos')}
-                  >
-                    <option value="Todos">Todos os Status</option>
-                    {Object.values(ProjectStatus).map(s => (
-                      <option key={s} value={s}>{s}</option>
-                    ))}
-                  </select>
-                </div>
-
-                <input 
-                  type="file" 
-                  ref={fileInputRef} 
-                  onChange={handleImportCSV} 
-                  accept=".csv" 
-                  className="hidden" 
-                />
-                
-                <button
-                  onClick={() => fileInputRef.current?.click()}
-                  className="flex items-center gap-2 px-4 py-2 bg-stone-100 text-stone-700 rounded-lg text-sm font-medium hover:bg-stone-200 transition-colors"
-                  title="Importar projetos de uma planilha (CSV)"
+                <select 
+                  className="p-2 border border-stone-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500 bg-white"
+                  value={statusFilter}
+                  onChange={(e) => setStatusFilter(e.target.value as ProjectStatus | 'Todos')}
                 >
-                  <Icons.Upload />
-                  Importar CSV
-                </button>
-
-                <button
-                  onClick={handleExportCSV}
-                  className="flex items-center gap-2 px-4 py-2 border border-stone-200 text-stone-600 rounded-lg text-sm font-medium hover:bg-stone-50 transition-colors"
-                  title="Exportar projetos filtrados para CSV"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
-                  Exportar CSV
-                </button>
+                  <option value="Todos">Todos os Status</option>
+                  {Object.values(ProjectStatus).map(s => (
+                    <option key={s} value={s}>{s}</option>
+                  ))}
+                </select>
               </div>
             </div>
 
@@ -368,11 +308,9 @@ const App: React.FC = () => {
                 const alerts = getProjectAlerts(project);
                 return (
                   <div key={project.id} className="bg-white rounded-xl border border-stone-200 shadow-sm hover:shadow-md transition-shadow overflow-hidden group relative">
-                    {alerts.length > 0 && (
-                      <div className="absolute top-0 right-0 p-4 z-10">
-                        {alerts.map((alert, idx) => (
-                          <div key={idx} title={alert.message} className={`w-3 h-3 rounded-full mb-1 animate-pulse shadow-sm ${alert.type === 'danger' ? 'bg-red-500' : 'bg-yellow-500'}`} />
-                        ))}
+                    {project.isExternal && (
+                      <div className="absolute top-0 left-0 px-2 py-0.5 bg-emerald-500 text-[9px] text-white font-bold rounded-br-lg z-10">
+                        GOOGLE SHEETS
                       </div>
                     )}
                     
@@ -392,46 +330,21 @@ const App: React.FC = () => {
                               {project.status}
                             </span>
                             <span className="text-xs text-stone-400 flex items-center gap-1">
-                              <span className="font-semibold text-stone-500">Recebido:</span> {new Date(project.receivedDate).toLocaleDateString('pt-BR')}
+                              <span className="font-semibold text-stone-500">Data:</span> {project.receivedDate}
                             </span>
                           </div>
-                          {(project.clientPhone || project.clientEmail) && (
-                            <div className="flex gap-3 mt-2">
-                              {project.clientPhone && (
-                                <span className="text-[10px] text-stone-400 flex items-center gap-1">
-                                  <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l2.27-2.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"></path></svg>
-                                  {project.clientPhone}
-                                </span>
-                              )}
-                              {project.clientEmail && (
-                                <span className="text-[10px] text-stone-400 flex items-center gap-1">
-                                  <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"></path><polyline points="22,6 12,13 2,6"></polyline></svg>
-                                  {project.clientEmail}
-                                </span>
-                              )}
-                            </div>
-                          )}
                         </div>
-                        <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <div className="flex gap-1">
                           <button onClick={() => handleEdit(project)} className="p-2 text-stone-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg">
                             <Icons.Edit />
                           </button>
-                          <button onClick={() => handleDelete(project.id)} className="p-2 text-stone-400 hover:text-red-600 hover:bg-red-50 rounded-lg">
-                            <Icons.Trash />
-                          </button>
+                          {!project.isExternal && (
+                            <button onClick={() => handleDelete(project.id)} className="p-2 text-stone-400 hover:text-red-600 hover:bg-red-50 rounded-lg">
+                              <Icons.Trash />
+                            </button>
+                          )}
                         </div>
                       </div>
-
-                      {alerts.length > 0 && (
-                        <div className="mb-4 space-y-1">
-                          {alerts.map((alert, idx) => (
-                            <div key={idx} className={`text-[10px] font-bold px-2 py-1 rounded flex items-center gap-1 ${alert.type === 'danger' ? 'bg-red-50 text-red-700' : 'bg-yellow-50 text-yellow-700'}`}>
-                              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
-                              {alert.message.toUpperCase()}
-                            </div>
-                          ))}
-                        </div>
-                      )}
 
                       <div className="space-y-3 mb-6">
                         {project.environments.map(env => (
@@ -447,71 +360,72 @@ const App: React.FC = () => {
                             <span className={env.completed ? "font-bold text-stone-900" : "text-stone-400"}>R$ {(env.value || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</span>
                           </div>
                         ))}
-                        {project.environments.length === 0 && <p className="text-xs text-stone-400 italic">Nenhum ambiente cadastrado</p>}
                       </div>
 
                       <div className="grid grid-cols-2 gap-4 p-4 bg-stone-50 rounded-lg border border-stone-100">
                         <div>
-                          <p className="text-[10px] uppercase font-bold text-stone-400 tracking-wider">Total Concluído</p>
-                          <p className="text-lg font-bold text-stone-900">R$ {calculateCompletedTotal(project).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</p>
-                          <p className="text-[9px] text-stone-400">De R$ {calculateProjectTotal(project).toLocaleString('pt-BR', { minimumFractionDigits: 2 })} total</p>
+                          <p className="text-[10px] uppercase font-bold text-stone-400 tracking-wider">Total Projeto</p>
+                          <p className="text-lg font-bold text-stone-900">R$ {calculateProjectTotal(project).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</p>
                         </div>
                         <div className="text-right">
                           <p className="text-[10px] uppercase font-bold text-stone-400 tracking-wider">Comissão ({project.commissionPercentage.toString().replace('.', ',')}%)</p>
                           <p className="text-lg font-bold text-emerald-600">R$ {calculateCommission(project).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</p>
-                          <p className="text-[9px] text-stone-400">Sobre valor concluído</p>
                         </div>
                       </div>
 
-                      <div className="mt-4 pt-4 border-t border-stone-100 flex flex-wrap gap-x-4 gap-y-2">
-                         {project.deadlineDate && (
-                           <div className={`text-xs font-medium flex items-center gap-1 ${alerts.some(a => a.message.includes('prazo') || a.message.includes('ATRASADO')) ? 'text-red-600' : 'text-stone-500'}`}>
-                              <Icons.Calendar /> Prazo: {new Date(project.deadlineDate).toLocaleDateString('pt-BR')}
-                           </div>
-                         )}
-                         {project.measurementDate && (
-                           <div className="text-xs text-blue-500 font-medium flex items-center gap-1">
-                              <Icons.Calendar /> Medição: {new Date(project.measurementDate).toLocaleDateString('pt-BR')}
-                           </div>
-                         )}
-                         {project.status === ProjectStatus.FINALIZADO && project.finishedDate && (
-                            <div className="text-xs text-green-600 font-medium flex items-center gap-1">
-                               ✓ Finalizado em {new Date(project.finishedDate).toLocaleDateString('pt-BR')}
-                            </div>
-                         )}
-                      </div>
-
-                      <div className="mt-4">
-                        <button 
-                          onClick={() => fetchAiAnalysis(project)}
-                          className="text-xs text-emerald-700 hover:text-emerald-800 underline flex items-center gap-1"
-                        >
-                           Gerar insight da IA
-                        </button>
-                        {aiAnalysis[project.id] && (
-                          <div className="mt-2 p-3 bg-emerald-50 text-emerald-800 text-xs rounded-lg border border-emerald-100 italic">
-                            "{aiAnalysis[project.id]}"
-                          </div>
-                        )}
-                      </div>
+                      {project.notes && (
+                        <div className="mt-4 p-2 bg-stone-50 text-[10px] text-stone-500 rounded border italic">
+                          {project.notes}
+                        </div>
+                      )}
                     </div>
                   </div>
                 );
               })}
-
-              {filteredProjects.length === 0 && (
-                <div className="col-span-full py-20 text-center">
-                  <div className="w-16 h-16 bg-stone-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                    <Icons.Wallet />
-                  </div>
-                  <h3 className="text-stone-600 font-medium">Nenhum projeto encontrado</h3>
-                  <p className="text-stone-400 text-sm">Tente ajustar seus filtros ou clique em "Novo Projeto"</p>
-                </div>
-              )}
             </div>
           </div>
         )}
       </main>
+
+      {/* Modal de Configurações da Planilha */}
+      {isSettingsOpen && (
+        <div className="fixed inset-0 bg-stone-900/50 backdrop-blur-sm z-[60] flex items-center justify-center p-4">
+          <div className="bg-white w-full max-w-md rounded-2xl shadow-2xl overflow-hidden">
+            <div className="p-6 border-b flex justify-between items-center">
+              <h2 className="text-xl font-bold text-stone-800">Vincular Google Planilhas</h2>
+              <button onClick={() => setIsSettingsOpen(false)} className="text-stone-400 hover:text-stone-600">
+                 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+              </button>
+            </div>
+            <div className="p-6 space-y-4">
+              <p className="text-sm text-stone-500">
+                Cole abaixo o link CSV da sua planilha (obtido em Arquivo > Compartilhar > Publicar na Web > CSV).
+              </p>
+              <input 
+                type="text" 
+                placeholder="https://docs.google.com/spreadsheets/d/e/.../pub?output=csv"
+                className="w-full p-3 border rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500"
+                value={sheetUrl}
+                onChange={(e) => setSheetUrl(e.target.value)}
+              />
+              <div className="flex gap-2 pt-2">
+                <button 
+                  onClick={() => handleSyncGoogleSheet(sheetUrl)}
+                  className="flex-1 bg-emerald-600 text-white py-2 rounded-lg font-medium hover:bg-emerald-700"
+                >
+                  Salvar e Sincronizar
+                </button>
+                <button 
+                  onClick={() => { setSheetUrl(''); setProjects(p => p.filter(x => !x.isExternal)); }}
+                  className="px-4 border rounded-lg text-red-500 hover:bg-red-50"
+                >
+                  Desvincular
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {isFormOpen && (
         <div className="fixed inset-0 bg-stone-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
@@ -520,10 +434,7 @@ const App: React.FC = () => {
               <h2 className="text-xl font-bold text-stone-800">
                 {editingProject ? 'Editar Projeto' : 'Cadastrar Novo Projeto'}
               </h2>
-              <button 
-                onClick={() => setIsFormOpen(false)}
-                className="text-stone-400 hover:text-stone-600 transition-colors"
-              >
+              <button onClick={() => setIsFormOpen(false)} className="text-stone-400 hover:text-stone-600">
                 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
               </button>
             </div>
