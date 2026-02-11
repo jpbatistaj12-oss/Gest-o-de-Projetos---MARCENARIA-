@@ -28,71 +28,115 @@ const App: React.FC = () => {
 
   useEffect(() => {
     localStorage.setItem('marmore-sheet-url', sheetUrl);
-    if (sheetUrl && projects.length === 0) {
-      handleSyncGoogleSheet(sheetUrl);
-    }
   }, [sheetUrl]);
+
+  // Função para converter link do Google Sheets em link de exportação CSV
+  const convertToCsvUrl = (url: string) => {
+    if (url.includes('/edit')) {
+      return url.replace(/\/edit.*$/, '/export?format=csv');
+    }
+    if (url.includes('/pubhtml')) {
+      return url.replace('/pubhtml', '/pub?output=csv');
+    }
+    return url;
+  };
+
+  const parseCsvLine = (text: string) => {
+    const result = [];
+    let cur = '';
+    let inQuote = false;
+    for (let i = 0; i < text.length; i++) {
+      const char = text[i];
+      if (char === '"') {
+        inQuote = !inQuote;
+      } else if (char === ',' && !inQuote) {
+        result.push(cur.trim());
+        cur = '';
+      } else {
+        cur += char;
+      }
+    }
+    result.push(cur.trim());
+    return result;
+  };
 
   const handleSyncGoogleSheet = async (url: string) => {
     if (!url) return;
     setIsSyncing(true);
     try {
-      const response = await fetch(url);
+      const csvUrl = convertToCsvUrl(url);
+      const response = await fetch(csvUrl);
       const text = await response.text();
       const lines = text.split(/\r?\n/);
       
       const newProjects: Project[] = [];
       
-      for (let i = 4; i < lines.length; i++) {
+      // Itera as linhas procurando dados na parte de "PROJETOS LIBERADOS"
+      // De acordo com o CSV enviado, os dados de projetos liberados começam na Coluna G (index 6)
+      for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
-        if (!line) continue;
+        if (!line || line.trim() === '') continue;
         
-        const values = line.match(/(".*?"|[^",\s]+)(?=\s*,|\s*$)/g) || line.split(',');
-        const cleanValues = values.map(v => v.replace(/^"|"$/g, '').trim());
+        const cleanValues = parseCsvLine(line);
+        
+        // Se a linha for muito curta, ignora
+        if (cleanValues.length < 10) continue;
 
+        // Mapeamento baseado na planilha enviada:
+        // Coluna G (6): DATA
+        // Coluna H (7): CLIENTE
+        // Coluna I (8): AMBIENTE
+        // Coluna J (9): MEDIÇÃO (Info extra)
+        // Coluna K (10): PEDIDO
+        // Coluna L (11): VALOR
+        
         const dataStr = cleanValues[6];
         const cliente = cleanValues[7];
         const ambiente = cleanValues[8];
+        const medicaoInfo = cleanValues[9];
         const pedido = cleanValues[10];
         const valorStr = cleanValues[11] || "";
 
-        if (!cliente || cliente === "CLIENTE") continue;
+        // Ignora cabeçalhos ou linhas vazias de cliente
+        if (!cliente || cliente === "CLIENTE" || cliente === "JANEIRO" || cliente.length < 3) continue;
 
         const valorNumeric = parseFloat(
           valorStr.replace('R$', '').replace(/\./g, '').replace(',', '.').trim()
         ) || 0;
 
-        const syncId = `sheet-${pedido}-${cliente}-${ambiente}`;
+        // Criar ID único para evitar duplicatas na sincronização
+        const syncId = `sheet-${pedido || 'no-ped'}-${cliente}-${ambiente}`;
         
-        if (valorNumeric > 0 || ambiente) {
-          newProjects.push({
-            id: syncId,
-            clientName: cliente,
-            orderNumber: pedido,
-            receivedDate: dataStr || new Date().toISOString().split('T')[0],
-            status: ProjectStatus.ANDAMENTO,
-            environments: [{
-              id: crypto.randomUUID(),
-              name: ambiente || 'Geral',
-              value: valorNumeric,
-              completed: false
-            }],
-            commissionPercentage: 0.5,
-            isExternal: true,
-            notes: `Importado via Google Sheets. Medição: ${cleanValues[9]}`
-          });
-        }
+        newProjects.push({
+          id: syncId,
+          clientName: cliente,
+          orderNumber: pedido,
+          receivedDate: dataStr || new Date().toISOString().split('T')[0],
+          status: ProjectStatus.ANDAMENTO,
+          environments: [{
+            id: crypto.randomUUID(),
+            name: ambiente || 'Geral',
+            value: valorNumeric,
+            completed: false
+          }],
+          commissionPercentage: 0.5,
+          isExternal: true,
+          notes: `Importado: ${medicaoInfo}`
+        });
       }
 
       if (newProjects.length > 0) {
         setProjects(prev => {
           const manualOnes = prev.filter(p => !p.isExternal);
+          // Agrupa ambientes de um mesmo pedido/cliente se necessário (opcional, aqui mantemos 1:1 com a linha da planilha)
           return [...manualOnes, ...newProjects];
         });
+      } else {
+        alert("Nenhum dado válido encontrado na parte de 'Projetos Liberados' da planilha.");
       }
     } catch (error) {
       console.error("Erro ao sincronizar:", error);
-      alert("Erro ao ler a planilha. Verifique se o link está correto.");
+      alert("Erro ao ler a planilha. Certifique-se de que o link está correto e a planilha tem permissão de leitura.");
     } finally {
       setIsSyncing(false);
     }
@@ -179,7 +223,7 @@ const App: React.FC = () => {
         </nav>
 
         <div className="mt-auto pt-6 border-t border-stone-800 text-stone-500 text-xs px-2">
-          © 2024 Marmoraria v1.3
+          © 2024 Marmoraria v1.4
         </div>
       </aside>
 
@@ -348,11 +392,11 @@ const App: React.FC = () => {
             </div>
             <div className="p-6 space-y-4">
               <p className="text-sm text-stone-500">
-                Cole o link do CSV público da sua planilha do Google para importar automaticamente.
+                Cole o link da sua planilha do Google. O sistema cuidará do resto!
               </p>
               <input 
                 type="text" 
-                placeholder="https://docs.google.com/spreadsheets/d/e/.../pub?output=csv"
+                placeholder="https://docs.google.com/spreadsheets/d/..."
                 className="w-full p-3 border border-stone-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500"
                 value={sheetUrl}
                 onChange={(e) => setSheetUrl(e.target.value)}
@@ -374,6 +418,9 @@ const App: React.FC = () => {
                   Limpar
                 </button>
               </div>
+              <p className="text-[10px] text-stone-400 italic mt-2">
+                Nota: Certifique-se de que a planilha está compartilhada como "Qualquer pessoa com o link pode ler".
+              </p>
             </div>
           </div>
         </div>
