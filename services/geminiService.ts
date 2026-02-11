@@ -3,15 +3,19 @@ import { GoogleGenAI } from "@google/genai";
 import { Project } from "../types";
 
 export class GeminiService {
-  private ai: GoogleGenAI;
+  private ai: GoogleGenAI | null = null;
 
-  constructor() {
-    // Correctly initialize with process.env.API_KEY as per guidelines
-    this.ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  private getClient() {
+    if (!this.ai) {
+      const apiKey = typeof process !== 'undefined' ? process.env.API_KEY : '';
+      this.ai = new GoogleGenAI({ apiKey: apiKey || '' });
+    }
+    return this.ai;
   }
 
   async generateProjectSummary(project: Project): Promise<string> {
     try {
+      const client = this.getClient();
       const prompt = `
         Aja como um consultor de marmoraria. Analise o seguinte projeto:
         Cliente: ${project.clientName}
@@ -21,7 +25,7 @@ export class GeminiService {
         Gere uma breve análise (3 frases) sobre o status financeiro e logístico deste projeto, dando uma dica prática para a finalização ou otimização do lucro.
       `;
 
-      const response = await this.ai.models.generateContent({
+      const response = await client.models.generateContent({
         model: 'gemini-3-flash-preview',
         contents: prompt,
       });
