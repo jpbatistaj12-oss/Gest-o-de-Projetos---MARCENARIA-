@@ -1,6 +1,6 @@
 
-import React, { useState, useEffect, useMemo } from 'react';
-import { Project, ProjectStatus } from './types';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { Project, ProjectStatus, Environment } from './types';
 import { Icons, STATUS_COLORS } from './constants';
 import ProjectForm from './components/ProjectForm';
 import Dashboard from './components/Dashboard';
@@ -17,6 +17,7 @@ const App: React.FC = () => {
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<ProjectStatus | 'Todos'>('Todos');
   const [aiAnalysis, setAiAnalysis] = useState<Record<string, string>>({});
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     localStorage.setItem('marmore-projects', JSON.stringify(projects));
@@ -102,6 +103,91 @@ const App: React.FC = () => {
   const calculateCommission = (project: Project) => {
     const total = calculateCompletedTotal(project);
     return total * (project.commissionPercentage / 100);
+  };
+
+  const handleImportCSV = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const text = e.target?.result as string;
+      if (!text) return;
+
+      const lines = text.split(/\r?\n/);
+      if (lines.length < 2) return;
+
+      // Detectar delimitador (vírgula ou ponto-e-vírgula)
+      const firstLine = lines[0];
+      const delimiter = firstLine.includes(';') ? ';' : ',';
+      
+      const headers = firstLine.split(delimiter).map(h => h.trim().toLowerCase().replace(/"/g, ''));
+      
+      const newProjects: Project[] = [];
+
+      for (let i = 1; i < lines.length; i++) {
+        if (!lines[i].trim()) continue;
+        
+        const values = lines[i].split(delimiter).map(v => v.trim().replace(/"/g, ''));
+        const row: Record<string, string> = {};
+        headers.forEach((header, index) => {
+          row[header] = values[index] || '';
+        });
+
+        // Tentar mapear campos
+        const clientName = row['cliente'] || row['nome'] || row['client'] || '';
+        if (!clientName) continue;
+
+        const orderNumber = row['pedido'] || row['order'] || row['numero'] || '';
+        const email = row['email'] || row['e-mail'] || '';
+        const phone = row['telefone'] || row['phone'] || row['celular'] || '';
+        const statusStr = row['status'] || '';
+        const valueStr = row['valor'] || row['total'] || '0';
+        const notes = row['observacoes'] || row['notas'] || '';
+        const commStr = row['comissao'] || row['%'] || '0';
+
+        // Validar status
+        let status = ProjectStatus.ESPERA;
+        if (Object.values(ProjectStatus).includes(statusStr as ProjectStatus)) {
+          status = statusStr as ProjectStatus;
+        }
+
+        const value = parseFloat(valueStr.replace(',', '.')) || 0;
+        const commission = parseFloat(commStr.replace(',', '.')) || 0;
+
+        const environments: Environment[] = [{
+          id: crypto.randomUUID(),
+          name: 'Ambiente Importado',
+          value: value,
+          completed: status === ProjectStatus.FINALIZADO
+        }];
+
+        newProjects.push({
+          id: crypto.randomUUID(),
+          clientName,
+          clientEmail: email,
+          clientPhone: phone,
+          orderNumber: orderNumber,
+          status,
+          receivedDate: new Date().toISOString().split('T')[0],
+          environments,
+          commissionPercentage: commission,
+          notes: notes
+        });
+      }
+
+      if (newProjects.length > 0) {
+        if (window.confirm(`Deseja importar ${newProjects.length} projetos da planilha?`)) {
+          setProjects(prev => [...prev, ...newProjects]);
+        }
+      } else {
+        alert("Não foi possível encontrar dados válidos na planilha. Certifique-se de que a primeira linha contém os cabeçalhos (ex: Cliente, Valor, Status).");
+      }
+      
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    };
+
+    reader.readAsText(file);
   };
 
   const handleExportCSV = () => {
@@ -234,8 +320,8 @@ const App: React.FC = () => {
                 </div>
               </div>
               
-              <div className="flex flex-wrap items-center gap-4 shrink-0">
-                <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-3 shrink-0">
+                <div className="flex items-center gap-2 mr-2">
                   <span className="text-sm font-medium text-stone-500 whitespace-nowrap">Status:</span>
                   <select 
                     className="p-2 border border-stone-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500 bg-white"
@@ -248,6 +334,23 @@ const App: React.FC = () => {
                     ))}
                   </select>
                 </div>
+
+                <input 
+                  type="file" 
+                  ref={fileInputRef} 
+                  onChange={handleImportCSV} 
+                  accept=".csv" 
+                  className="hidden" 
+                />
+                
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  className="flex items-center gap-2 px-4 py-2 bg-stone-100 text-stone-700 rounded-lg text-sm font-medium hover:bg-stone-200 transition-colors"
+                  title="Importar projetos de uma planilha (CSV)"
+                >
+                  <Icons.Upload />
+                  Importar CSV
+                </button>
 
                 <button
                   onClick={handleExportCSV}
