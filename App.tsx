@@ -44,24 +44,13 @@ const App: React.FC = () => {
       
       const newProjects: Project[] = [];
       
-      // O layout enviado começa os dados reais na linha 5 (index 4)
-      // E a tabela de "PROJETOS LIBERADOS" começa na coluna 7 (index 6)
       for (let i = 4; i < lines.length; i++) {
         const line = lines[i];
         if (!line) continue;
         
-        // Regex para lidar com vírgulas dentro de aspas (ex: "BANHO MASTER, COZINHA")
         const values = line.match(/(".*?"|[^",\s]+)(?=\s*,|\s*$)/g) || line.split(',');
         const cleanValues = values.map(v => v.replace(/^"|"$/g, '').trim());
 
-        // Colunas da tabela "LIBERADOS":
-        // 6: DATA (index 6)
-        // 7: CLIENTE (index 7)
-        // 8: AMBIENTE (index 8)
-        // 9: MEDIÇÃO (index 9)
-        // 10: PEDIDO (index 10)
-        // 11: VALOR (index 11)
-        
         const dataStr = cleanValues[6];
         const cliente = cleanValues[7];
         const ambiente = cleanValues[8];
@@ -70,15 +59,12 @@ const App: React.FC = () => {
 
         if (!cliente || cliente === "CLIENTE") continue;
 
-        // Limpeza de valor (R$ 1.234,56 -> 1234.56)
         const valorNumeric = parseFloat(
           valorStr.replace('R$', '').replace(/\./g, '').replace(',', '.').trim()
         ) || 0;
 
-        // Criar ID baseado no Pedido + Cliente para evitar duplicidade na sincronização
         const syncId = `sheet-${pedido}-${cliente}-${ambiente}`;
         
-        // Só adiciona se não for uma linha de total ou vazia
         if (valorNumeric > 0 || ambiente) {
           newProjects.push({
             id: syncId,
@@ -92,7 +78,7 @@ const App: React.FC = () => {
               value: valorNumeric,
               completed: false
             }],
-            commissionPercentage: 0.5, // Padrão
+            commissionPercentage: 0.5,
             isExternal: true,
             notes: `Importado via Google Sheets. Medição: ${cleanValues[9]}`
           });
@@ -100,7 +86,6 @@ const App: React.FC = () => {
       }
 
       if (newProjects.length > 0) {
-        // Mesclar projetos (mantém os manuais, atualiza/adiciona os da planilha)
         setProjects(prev => {
           const manualOnes = prev.filter(p => !p.isExternal);
           return [...manualOnes, ...newProjects];
@@ -173,12 +158,6 @@ const App: React.FC = () => {
     if (window.confirm('Deseja realmente excluir este projeto?')) {
       setProjects(projects.filter(p => p.id !== id));
     }
-  };
-
-  const fetchAiAnalysis = async (project: Project) => {
-    if (aiAnalysis[project.id]) return;
-    const summary = await geminiService.generateProjectSummary(project);
-    setAiAnalysis(prev => ({ ...prev, [project.id]: summary }));
   };
 
   const calculateProjectTotal = (project: Project) => {
@@ -306,6 +285,9 @@ const App: React.FC = () => {
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
               {filteredProjects.map((project) => {
                 const alerts = getProjectAlerts(project);
+                const hasIncompleteEnvironments = project.environments.some(env => !env.completed);
+                const isProjectFinalized = project.status === ProjectStatus.FINALIZADO;
+
                 return (
                   <div key={project.id} className="bg-white rounded-xl border border-stone-200 shadow-sm hover:shadow-md transition-shadow overflow-hidden group relative">
                     {project.isExternal && (
@@ -316,12 +298,18 @@ const App: React.FC = () => {
                     
                     <div className="p-6">
                       <div className="flex justify-between items-start mb-4">
-                        <div>
-                          <div className="flex items-center gap-2">
-                             <h3 className="text-lg font-bold text-stone-800">{project.clientName}</h3>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                             <h3 className="text-lg font-bold text-stone-800 truncate">{project.clientName}</h3>
                              {project.orderNumber && (
                                <span className="text-[10px] font-bold px-1.5 py-0.5 bg-stone-100 text-stone-500 rounded border border-stone-200">
                                  {project.orderNumber}
+                               </span>
+                             )}
+                             {hasIncompleteEnvironments && !isProjectFinalized && (
+                               <span className="flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 bg-amber-100 text-amber-700 rounded border border-amber-200 animate-pulse">
+                                 <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+                                 PENDENTE
                                </span>
                              )}
                           </div>
@@ -355,9 +343,13 @@ const App: React.FC = () => {
                                ) : (
                                  <div className="w-1.5 h-1.5 rounded-full bg-stone-200"></div>
                                )}
-                               <span className={env.completed ? "text-stone-800 font-medium" : "text-stone-500"}>{env.name}</span>
+                               <span className={env.completed ? "text-stone-800 font-medium" : "text-stone-500 italic"}>
+                                 {env.name}
+                               </span>
                             </div>
-                            <span className={env.completed ? "font-bold text-stone-900" : "text-stone-400"}>R$ {(env.value || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</span>
+                            <span className={env.completed ? "font-bold text-stone-900" : "text-stone-400"}>
+                              R$ {(env.value || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                            </span>
                           </div>
                         ))}
                       </div>
@@ -387,7 +379,6 @@ const App: React.FC = () => {
         )}
       </main>
 
-      {/* Modal de Configurações da Planilha */}
       {isSettingsOpen && (
         <div className="fixed inset-0 bg-stone-900/50 backdrop-blur-sm z-[60] flex items-center justify-center p-4">
           <div className="bg-white w-full max-w-md rounded-2xl shadow-2xl overflow-hidden">
