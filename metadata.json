@@ -1,0 +1,5 @@
+{
+  "name": "Gestão de Projetos",
+  "description": "Um sistema completo para gerenciamento de projetos, permitindo controle de status, ambientes, valores, datas e cálculo automatizado de comissões.",
+  "requestFramePermissions": []
+}
