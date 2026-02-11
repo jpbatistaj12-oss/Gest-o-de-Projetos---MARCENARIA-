@@ -30,7 +30,6 @@ const App: React.FC = () => {
     localStorage.setItem('marmore-sheet-url', sheetUrl);
   }, [sheetUrl]);
 
-  // Função para converter link do Google Sheets em link de exportação CSV
   const convertToCsvUrl = (url: string) => {
     if (url.includes('/edit')) {
       return url.replace(/\/edit.*$/, '/export?format=csv');
@@ -69,74 +68,82 @@ const App: React.FC = () => {
       const text = await response.text();
       const lines = text.split(/\r?\n/);
       
-      const newProjects: Project[] = [];
+      // Objeto para agrupar projetos por nome de cliente
+      const groupedProjects: Record<string, Project> = {};
       
-      // Itera as linhas procurando dados na parte de "PROJETOS LIBERADOS"
-      // De acordo com o CSV enviado, os dados de projetos liberados começam na Coluna G (index 6)
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
         if (!line || line.trim() === '') continue;
         
         const cleanValues = parseCsvLine(line);
-        
-        // Se a linha for muito curta, ignora
         if (cleanValues.length < 10) continue;
 
-        // Mapeamento baseado na planilha enviada:
-        // Coluna G (6): DATA
-        // Coluna H (7): CLIENTE
-        // Coluna I (8): AMBIENTE
-        // Coluna J (9): MEDIÇÃO (Info extra)
-        // Coluna K (10): PEDIDO
-        // Coluna L (11): VALOR
-        
+        // Mapeamento baseado na planilha Colunas G a L
         const dataStr = cleanValues[6];
         const cliente = cleanValues[7];
-        const ambiente = cleanValues[8];
+        const ambienteNome = cleanValues[8];
         const medicaoInfo = cleanValues[9];
         const pedido = cleanValues[10];
         const valorStr = cleanValues[11] || "";
 
-        // Ignora cabeçalhos ou linhas vazias de cliente
-        if (!cliente || cliente === "CLIENTE" || cliente === "JANEIRO" || cliente.length < 3) continue;
+        if (!cliente || cliente === "CLIENTE" || cliente === "JANEIRO" || cliente.length < 2) continue;
 
         const valorNumeric = parseFloat(
           valorStr.replace('R$', '').replace(/\./g, '').replace(',', '.').trim()
         ) || 0;
 
-        // Criar ID único para evitar duplicatas na sincronização
-        const syncId = `sheet-${pedido || 'no-ped'}-${cliente}-${ambiente}`;
-        
-        newProjects.push({
-          id: syncId,
-          clientName: cliente,
-          orderNumber: pedido,
-          receivedDate: dataStr || new Date().toISOString().split('T')[0],
-          status: ProjectStatus.ANDAMENTO,
-          environments: [{
-            id: crypto.randomUUID(),
-            name: ambiente || 'Geral',
-            value: valorNumeric,
-            completed: false
-          }],
-          commissionPercentage: 0.5,
-          isExternal: true,
-          notes: `Importado: ${medicaoInfo}`
-        });
+        // Chave de agrupamento (Nome do Cliente em maiúsculas para evitar duplicatas por erro de digitação)
+        const clientKey = cliente.trim().toUpperCase();
+
+        const newEnv: Environment = {
+          id: crypto.randomUUID(),
+          name: ambienteNome || 'Geral',
+          value: valorNumeric,
+          completed: false
+        };
+
+        if (groupedProjects[clientKey]) {
+          // Cliente já existe, adiciona o ambiente ao projeto existente
+          groupedProjects[clientKey].environments.push(newEnv);
+          
+          // Adiciona o número do pedido se for diferente
+          if (pedido && !groupedProjects[clientKey].orderNumber?.includes(pedido)) {
+            groupedProjects[clientKey].orderNumber += `, ${pedido}`;
+          }
+          
+          // Anexa informações de medição extras se houver
+          if (medicaoInfo && !groupedProjects[clientKey].notes?.includes(medicaoInfo)) {
+            groupedProjects[clientKey].notes += ` | ${medicaoInfo}`;
+          }
+        } else {
+          // Novo cliente, cria a entrada inicial
+          groupedProjects[clientKey] = {
+            id: `sheet-${clientKey}`,
+            clientName: cliente.trim(),
+            orderNumber: pedido,
+            receivedDate: dataStr || new Date().toISOString().split('T')[0],
+            status: ProjectStatus.ANDAMENTO,
+            environments: [newEnv],
+            commissionPercentage: 0.5,
+            isExternal: true,
+            notes: medicaoInfo ? `Importado: ${medicaoInfo}` : 'Importado via planilha'
+          };
+        }
       }
 
-      if (newProjects.length > 0) {
+      const mergedList = Object.values(groupedProjects);
+
+      if (mergedList.length > 0) {
         setProjects(prev => {
           const manualOnes = prev.filter(p => !p.isExternal);
-          // Agrupa ambientes de um mesmo pedido/cliente se necessário (opcional, aqui mantemos 1:1 com a linha da planilha)
-          return [...manualOnes, ...newProjects];
+          return [...manualOnes, ...mergedList];
         });
       } else {
-        alert("Nenhum dado válido encontrado na parte de 'Projetos Liberados' da planilha.");
+        alert("Nenhum dado de cliente encontrado na planilha.");
       }
     } catch (error) {
       console.error("Erro ao sincronizar:", error);
-      alert("Erro ao ler a planilha. Certifique-se de que o link está correto e a planilha tem permissão de leitura.");
+      alert("Erro ao ler a planilha. Verifique as permissões de compartilhamento.");
     } finally {
       setIsSyncing(false);
     }
@@ -223,7 +230,7 @@ const App: React.FC = () => {
         </nav>
 
         <div className="mt-auto pt-6 border-t border-stone-800 text-stone-500 text-xs px-2">
-          © 2024 Marmoraria v1.4
+          © 2024 Marmoraria v1.5
         </div>
       </aside>
 
@@ -299,7 +306,7 @@ const App: React.FC = () => {
                   <div key={project.id} className="bg-white rounded-xl border border-stone-200 shadow-sm hover:shadow-md transition-shadow overflow-hidden group relative">
                     {project.isExternal && (
                       <div className="absolute top-0 left-0 px-2 py-0.5 bg-emerald-500 text-[9px] text-white font-bold rounded-br-lg z-10">
-                        SINC PLANILHA
+                        PROJETO AGRUPADO
                       </div>
                     )}
                     
@@ -341,7 +348,7 @@ const App: React.FC = () => {
                         </div>
                       </div>
 
-                      <div className="space-y-2 mb-6 max-h-32 overflow-y-auto pr-1">
+                      <div className="space-y-2 mb-6 max-h-48 overflow-y-auto pr-1">
                         {project.environments.map(env => (
                           <div key={env.id} className="flex justify-between items-center text-sm">
                             <div className="flex items-center gap-2">
@@ -371,6 +378,12 @@ const App: React.FC = () => {
                           <p className="text-lg font-bold text-emerald-600">R$ {calculateCommission(project).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</p>
                         </div>
                       </div>
+
+                      {project.notes && (
+                        <p className="mt-3 text-[10px] text-stone-400 italic line-clamp-2">
+                           {project.notes}
+                        </p>
+                      )}
                     </div>
                   </div>
                 );
@@ -385,14 +398,14 @@ const App: React.FC = () => {
         <div className="fixed inset-0 bg-stone-900/50 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
           <div className="bg-white w-full max-w-md rounded-2xl shadow-2xl overflow-hidden">
             <div className="p-6 border-b flex justify-between items-center">
-              <h2 className="text-xl font-bold text-stone-800">Sincronização Google</h2>
+              <h2 className="text-xl font-bold text-stone-800">Sincronização Unificada</h2>
               <button onClick={() => setIsSettingsOpen(false)} className="text-stone-400 hover:text-stone-600">
                  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
               </button>
             </div>
             <div className="p-6 space-y-4">
               <p className="text-sm text-stone-500">
-                Cole o link da sua planilha do Google. O sistema cuidará do resto!
+                Cole o link da sua planilha. O sistema agora agrupa automaticamente ambientes do mesmo cliente em um único cartão.
               </p>
               <input 
                 type="text" 
@@ -409,7 +422,7 @@ const App: React.FC = () => {
                   }}
                   className="flex-1 bg-emerald-600 text-white py-2 rounded-lg font-medium hover:bg-emerald-700 transition-colors"
                 >
-                  Salvar e Atualizar
+                  Sincronizar e Agrupar
                 </button>
                 <button 
                   onClick={() => { setSheetUrl(''); setProjects(p => p.filter(x => !x.isExternal)); setIsSettingsOpen(false); }}
@@ -418,9 +431,6 @@ const App: React.FC = () => {
                   Limpar
                 </button>
               </div>
-              <p className="text-[10px] text-stone-400 italic mt-2">
-                Nota: Certifique-se de que a planilha está compartilhada como "Qualquer pessoa com o link pode ler".
-              </p>
             </div>
           </div>
         </div>
